@@ -1,0 +1,10 @@
+project/
+  |-- data/
+  |   |--
+|
+  |-- src/
+  |   |-- eda.R
+
+|
+  |-- plots/
+  |   |-- model.pkl

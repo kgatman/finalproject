@@ -173,3 +173,11 @@ traceData_ready$recency_interpretation <- ifelse(
   traceData_ready$recency_interpretation == "Recent", 1L, 0L)
 
 prop.table(table(traceData_ready$recency_interpretation))
+
+#Discarding other levels that shouldn't have been here
+
+traceData_final <- traceData_final[traceData_final$recency_interpretation!="Invalid",]
+traceData_final <- traceData_final[traceData_final$recency_interpretation!="Negative",]
+
+# discard lingering levels
+traceData_final$recency_interpretation <- droplevels(traceData_final$recency_interpretation)

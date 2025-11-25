@@ -1,0 +1,11 @@
+project/
+  |-- data/
+  |   |--
+  |-- index.R
+  |   |--src/
+  |   |   |-- pre.R
+  |   |   |-- eda.R
+  |   |   |-- split.R
+  |   |   |-- models.R
+  |-- plots/
+  |   |-- 
