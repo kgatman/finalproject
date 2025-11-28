@@ -1,3 +1,25 @@
+library(h2o)
+h2o.init()
+
+###################################### Load additional packages ##############################
+library(caret) # used for performance metric functions
+library(pROC) # used for obtaining AUC
+
+######################## Convert train/test sets into H2O data frames ######################
+
+# To use data in H2O functions/models, it needs to be an H2O data frame. The following converts the built-in R data frame iris into an H2O frame and stores it in the H2O memory space. Now, all future processing (cleaning, modeling, predictions) happens in H2O's memory space (inside the Java engine, not R’s memory). H2O is great at handling big datasets relative to RAM size due to its optimized data structures.
+
+train_trace_h2o <- as.h2o(train_balanced_trace)
+test_trace_h2o <- as.h2o(test_trace)
+
+######################### Specify name of target and predictors #########################
+
+target <- "recency_interpretation"
+
+# use setdiff function, such as setdiff(x,y) to return the elements in x that are not in y. This removes the target from the list to only leave the predictors:
+
+predictors <- setdiff(names(train_balanced_trace), target)
+
 ######################### Fit a logistic regression model ################################
 
 # A logistic regression is in the class of a generalized linear model (GLM), various GLMs can be fitted in h2o for different types of responses (continuous, binary, count, multiple categories - multi-class classification)
@@ -23,7 +45,7 @@ df$OR <- exp(df[,2])
 
 df$p_value <- round(df$p_value,4)
 
-view(df)
+View(df)
 
 # Save predicted probabilities
 preds_LR_train <- h2o.predict(trace_LR, train_trace_h2o)
@@ -116,7 +138,7 @@ roc_LR_test <- roc(
 
 # 1. Load necessary libraries
 library(rpart)
-library(pROC)
+#library(pROC)
 
 # 2. Train the Decision Tree (rpart)
 # We use the standard R dataframes (train_trace), NOT the h2o ones

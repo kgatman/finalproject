@@ -5,8 +5,6 @@
 ##########################################################################################
 
 library(h2o)
-
-Sys.setenv(JAVA_HOME = "C:\\Program Files\\Java\\jdk-24")
 h2o.init()
 
 ###################################### Load additional packages ##############################
@@ -17,82 +15,6 @@ library(caret) # used for performance metric functions
 library(pROC) # used for obtaining AUC
 
 
-######################################## Loading the data ####################################
-
-# We will use the same data that was used for prac 1. NB, Dt and LR:
-
-library(arules)
-
-?AdultUCI
-
-data("AdultUCI")
-
-seed <- 123
-
-# Let's use a small data set (a random sample of 1000 observations) for quick computation of SVM and NN:
-set.seed(seed)
-AdultUCI <- AdultUCI[sample(nrow(AdultUCI), size = 10000), ] 
-
-AdultUCI <- na.omit(AdultUCI)
-
-summary(AdultUCI)
-
-str(AdultUCI)
-
-# Let's drop variables that we don't need:
-
-AdultUCI_new <- AdultUCI %>%
-  dplyr::select(
-    -fnlwgt,
-    -relationship,
-    -`capital-gain`,
-    -`capital-loss`,
-    -`education-num`
-  )
-
-# In addition, as we need to apply dummy variable encoding for these models, we do not want to attributes with high cardinality as that expands the dimensional. Therefore, we will drop 
-
-# use the following to determine the number of levels (cardinality) of the factor variables:
-
-sapply(Filter(is.factor, AdultUCI_new), nlevels)
-
-# Drop variables with high cardinality for demonstration purposes:
-
-AdultUCI_new <- AdultUCI_new %>%
-  dplyr::select(
-    -`native-country`,
-    -education,
-    -occupation
-  )
-
-# convert to data frame:
-
-AdultUCI_new <- as.data.frame(AdultUCI_new)
-
-str(AdultUCI_new)
-
-# notice that there are ordered variables in the data set. When we want to use the H2O package, it doesn't recognize ordered columns so we must unorder these variables:
-
-AdultUCI_new$income <- factor(AdultUCI_new$income, ordered = FALSE)
-#AdultUCI_new$education <- factor(AdultUCI_new$education, ordered = FALSE) - removed
-
-prop.table(table(AdultUCI_new$income))
-
-# converting class labels of income target to yes/no: 
-
-AdultUCI_new$income <- factor(ifelse(AdultUCI_new$income == "large", "Yes", "No")) #can change event of interest to small here
-
-# Ensure "Yes" is treated as the event of interest (ref) which is required for the train function used to fit the SVM:
-AdultUCI_new$income <- relevel(AdultUCI_new$income, ref = "Yes")
-
-prop.table(table(AdultUCI_new$income))
-
-summary(AdultUCI_new)
-
-# drop levels for those with 0 observations:
-
-AdultUCI_new <- droplevels(AdultUCI_new)
-
 
 ########################### Split the data into train/test sets##############################
 
@@ -101,10 +23,10 @@ AdultUCI_new <- droplevels(AdultUCI_new)
 set.seed(seed)
 
 # stratified sampling is is used to maintain the proportion of class labels in your training and test sets:
-split <- sample.split(AdultUCI_new$income, SplitRatio = 0.7) # change SplitRatio for different splits, such as change to 0.8 for 80:20 split
+split <- sample.split(train_balanced_trace$recency_interpretation, SplitRatio = 0.8) # change SplitRatio for different splits, such as change to 0.8 for 80:20 split
 
-train <- subset(AdultUCI_new, split == "TRUE")
-test <- subset(AdultUCI_new, split == "FALSE")
+train_svm <- subset(train_balanced_trace, split == "TRUE")
+test_svm <- subset(train_balanced_trace, split == "FALSE")
 
 ########################### Data pre-processing #############################################
 
@@ -114,17 +36,32 @@ test <- subset(AdultUCI_new, split == "FALSE")
 
 # RECALL: we centre and scale the TEST set according to the scale parameters of the TRAINING set. These training set scale parameters are obtained via the preProcess function and saved as an R object:
 
-train_norm_parameters <- preProcess(train, method = c("center", "scale"))
+train_norm_parameters <- preProcess(train_svm, method = c("center", "scale"))
 
 ## We then use the predict function to scale the training and test sets based on the scale parameters from the training set saved above (note the following makes no prediction, but simply scales the training and test sets to create a newly scaled set for each).
 
-train_scaled <- predict(train_norm_parameters,train)
-test_scaled <- predict(train_norm_parameters,test)
+train_scaled <- predict(train_norm_parameters,train_svm)
+test_scaled <- predict(train_norm_parameters,test_svm)
 
 summary(train_scaled)
 summary(test_scaled)
 
 ## NOTE: The data must be pre-processed (scaled, centered AND dummy variables)
+
+
+## NOTE: The data must be pre-processed (scaled, centered AND dummy variables)
+
+# I have to compromise the orgUnits from this training
+
+train_scaled <- train_scaled %>%
+  dplyr::select(
+    -orgUnit
+  )
+
+test_scaled <- test_scaled %>%
+  dplyr::select(
+    -orgUnit
+  )
 
 ############# Dummy variable encoding (test and training sets)  ###################
 
@@ -133,7 +70,7 @@ summary(test_scaled)
 library(recipes)
 
 # 1. define the model so that the function knows what is the target (this defines the recipe)
-rec <- recipe(income ~ ., data = train_scaled) %>%
+rec <- recipe(recency_interpretation ~ ., data = train_scaled) %>%
   step_dummy(all_nominal_predictors(), one_hot = FALSE)
 
 # to avoid perfect linearity, one of the categories of the variable during the encoding is dropped. This speeds up the training and improves the stability of the ML model. This is done by setting one_hot = FALSE. 
@@ -148,12 +85,26 @@ train_processed <- bake(rec_prep, new_data = NULL)
 
 colnames(train_processed) <- make.names(colnames(train_processed))
 
+install.packages("janitor")
+library(janitor)
+
+# Automatically fixes everything (dots -> underscores, caps -> lower)
+train_processed <- train_processed %>% 
+  clean_names()
+
 # 4. Apply (bake) the same transformations to the scaled test set
 test_processed <- bake(rec_prep, new_data = test_scaled)
 
 # fix names of columns which include a period:
 
 colnames(test_processed) <- make.names(colnames(test_processed))
+
+# Automatically fixes everything (dots -> underscores, caps -> lower)
+test_processed <- test_processed %>% 
+  clean_names()
+
+train_processed <- as.data.frame(train_processed)
+test_processed <- as.data.frame(test_processed)
 
 summary(train_processed)
 summary(test_processed)
@@ -197,7 +148,9 @@ grid3 <- expand.grid(C = seq(0, 2, by = 0.1)) # values from 0 to 2 in increments
 
 set.seed(seed)
 
-SVM_linear <- train(income ~.,      # state target here 
+levels(train_processed$recency_interpretation) <- make.names(levels(train_processed$recency_interpretation))
+
+SVM_linear <- train(recency_interpretation ~.,      # state target here 
                     data = train_processed, 
                     method = "svmLinear", # for linear SVM
                     metric="Roc", # Accuracy, Kappa, Sens, Spec, ROC
@@ -243,19 +196,26 @@ plot(roc_SVM_lin_train)
 
 pred_test_svm_linear = predict(SVM_linear,newdata=test_processed, type="prob")
 
-test_SVM_lin <- cbind(test_processed, pred_test_svm_linear[, "Yes", drop = FALSE]) 
+test_SVM_lin <- cbind(test_processed, pred_test_svm_linear[, "X1", drop = FALSE]) 
 
 # test (note the predicted probabilities are now in a column named "Yes")
-test_SVM_lin$pred_class <- factor(ifelse(test_SVM_lin$Yes > threshold,"Yes","No" ))
+test_SVM_lin$pred_class <- factor(ifelse(test_SVM_lin$X1 > threshold,"X1","X0" ))
 
 caret::confusionMatrix(test_SVM_lin$pred_class, 
-                       test_SVM_lin$income, 
+                       test_SVM_lin$recency_interpretation, 
                        mode="everything",
-                       positive='Yes')
+                       positive='X1')
 
 # extract ROC
 # actual classes first then predicted probabilities
-roc_SVM_lin_test <- roc(test_SVM_lin$income, test_SVM_lin$Yes)
+
+#roc_SVM_lin_test <- roc(test_SVM_lin$recency_interpretation, test_SVM_lin$Yes)
+
+roc_SVM_lin_test <- roc(
+  test_SVM_lin$recency_interpretation,
+  test_SVM_lin$X1
+)
+
 auc(roc_SVM_lin_test)
 plot(roc_SVM_lin_test)
 
@@ -280,7 +240,7 @@ set.seed(seed)
 
 ###### Note this takes a bit of time:
 
-SVM_radial = train(income ~., 
+SVM_radial = train(recency_interpretation ~., 
                    data = train_processed,
                    method = "svmRadial", # Radial kernel
                    metric="ROC", # Accuracy, Kappa, Sens, Spec, ROC
@@ -316,7 +276,7 @@ caret::confusionMatrix(train_SVM_radial$pred_class,
 
 # extract ROC
 # actual classes first then predicted probabilities
-roc_SVM_radial_train <- roc(train_SVM_radial$income, train_SVM_radial$Yes)
+roc_SVM_radial_train <- roc(train_SVM_radial$recency_interpretation, train_SVM_radial$Yes)
 auc(roc_SVM_radial_train)
 plot(roc_SVM_radial_train)
 
