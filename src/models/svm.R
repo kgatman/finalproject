@@ -245,7 +245,7 @@ SVM_radial = train(recency_interpretation ~.,
                    method = "svmRadial", # Radial kernel
                    metric="ROC", # Accuracy, Kappa, Sens, Spec, ROC
                    trControl=control,
-                   tuneGrid = grid2) # change to grid2
+                   tuneGrid = grid1) # change to grid2
 
 SVM_radial
 
