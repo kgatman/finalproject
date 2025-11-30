@@ -5,13 +5,6 @@
 #                                                                                        #
 ##########################################################################################
 
-## NB: Only a few of the hyperparameters are considered here for tuning. This list is not exhaustive. See the H2O documentation for each algorithm for their respective hyperparameters that can be tuned. 
-
-# currently, H2O does not have support for running the XGBoost platform in Windows, so we will not consider it at this stage. It is coming soon though. We will consider GBM instead.
-
-library(h2o)
-
-h2o.init()
 
 ################################# Load additional packages ##############################
 
@@ -20,143 +13,26 @@ library(caTools) # for splitting into train and test sets
 library(caret) # used for performance metric functions
 library(pROC) # used for obtaining AUC
 
-######################################## Loading the data ####################################
+# Helper function to convert recency_interpretation to factor with levels "0" and "1"
+# Handles various input formats: numeric (0/1), character ("0"/"1"), factor, etc.
+convert_recency_to_factor <- function(x) {
+  orig_vals <- x
+  # If it's a factor, get the underlying values
+  if(is.factor(orig_vals)) {
+    orig_vals <- as.character(orig_vals)
+  }
+  # Convert to numeric first (handles "0", "1", 0, 1, etc.)
+  numeric_vals <- suppressWarnings(as.numeric(orig_vals))
+  if(any(is.na(numeric_vals))) {
+    # If conversion to numeric failed, check for text values
+    # Map "Recent" or anything containing "1" to "1", everything else to "0"
+    char_vals <- tolower(as.character(orig_vals))
+    numeric_vals <- ifelse(grepl("recent|1", char_vals, ignore.case = TRUE), 1, 0)
+  }
+  # Convert to factor with explicit levels
+  factor(as.character(numeric_vals), levels = c("0", "1"))
+}
 
-# We will use the same data that was used for prac 1 and 3:
-
-library(arules)
-
-?AdultUCI
-
-data("AdultUCI")
-
-seed <- 123
-
-# Let's use a small data set (a random sample of 1000 observations) for quick computation:
-set.seed(seed)
-AdultUCI <- AdultUCI[sample(nrow(AdultUCI), size = 1000), ] 
-
-AdultUCI <- na.omit(AdultUCI) # remove observations with missing values
-
-summary(AdultUCI)
-
-str(AdultUCI)
-
-# Let's drop variables that we don't need:
-
-AdultUCI_new <- AdultUCI %>%
-  dplyr::select(
-    -fnlwgt,
-    -relationship,
-    -`capital-gain`,
-    -`capital-loss`,
-    -`education-num`
-  )
-
-# In addition, as we need to apply dummy variable encoding for these models, we do not want to attributes with high cardinality as that expands the dimensional. Therefore, we will drop 
-
-# use the following to determine the number of levels (cardinality) of the factor variables:
-
-sapply(Filter(is.factor, AdultUCI_new), nlevels)
-
-# Drop variables with high cardinality for demonstration purposes:
-
-AdultUCI_new <- AdultUCI_new %>%
-  dplyr::select(
-    -`native-country`,
-    -education,
-    -occupation
-  )
-
-# convert to data frame:
-
-AdultUCI_new <- as.data.frame(AdultUCI_new)
-
-str(AdultUCI_new)
-
-# notice that there are ordered variables in the data set. When we want to use the H2O package, it doesn't recognize ordered columns so we must unorder these variables:
-
-AdultUCI_new$income <- factor(AdultUCI_new$income, ordered = FALSE)
-#AdultUCI_new$education <- factor(AdultUCI_new$education, ordered = FALSE) - removed
-
-prop.table(table(AdultUCI_new$income))
-
-# converting class labels of income target to yes/no: 
-
-AdultUCI_new$income <- factor(ifelse(AdultUCI_new$income == "large", "Yes", "No")) #can change event of interest to small here
-
-# Ensure "Yes" is treated as the event of interest (ref) which is required for the train function used to fit the SVM:
-AdultUCI_new$income <- relevel(AdultUCI_new$income, ref = "Yes")
-
-prop.table(table(AdultUCI_new$income))
-
-summary(AdultUCI_new)
-
-# drop levels for those with 0 observations:
-
-AdultUCI_new <- droplevels(AdultUCI_new)
-
-
-###################### Split the data into train/test sets##############################
-
-# seed <- 123 # set a seed for reproducibility - specified earlier
-
-set.seed(seed)
-
-# stratified sampling is is used to maintain the proportion of class labels in your training and test sets:
-split <- sample.split(AdultUCI_new$income, SplitRatio = 0.7) # change SplitRatio for different splits, such as change to 0.8 for 80:20 split
-
-train <- subset(AdultUCI_new, split == "TRUE")
-test <- subset(AdultUCI_new, split == "FALSE")
-
-####################### Data pre-processing #############################################
-
-# Unlike the other models we have fitted, the SVM and drf require further pre-processing on the training and test sets (separately). This is because they do not work with categorical features. In addition, all numeric variables need to be normalized so that they are on the same scale, this ensures that they all contribute equally to the training of the model.
-
-########## Scaling of numeric features (test and training sets) ###############
-
-# RECALL: we centre and scale the TEST set according to the scale parameters of the TRAINING set. These training set scale parameters are obtained via the preProcess function and saved as an R object:
-
-train_norm_parameters <- preProcess(train, method = c("center", "scale"))
-
-## We then use the predict function to scale the training and test sets based on the scale parameters from the training set saved above (note the following makes no prediction, but simply scales the training and test sets to create a newly scaled set for each).
-
-train_scaled <- predict(train_norm_parameters,train)
-test_scaled <- predict(train_norm_parameters,test)
-
-summary(train_scaled)
-summary(test_scaled)
-
-## NOTE: The data must be pre-processed (scaled, centered AND dummy variables)
-
-############# Dummy variable encoding (test and training sets)  ###################
-
-# we will use the recipes package from tidymodels:
-
-library(recipes)
-
-# 1. define the model so that the function knows what is the target (this defines the recipe)
-rec <- recipe(income ~ ., data = train_scaled) %>%
-  step_dummy(all_nominal_predictors(), one_hot = FALSE)
-
-# to avoid perfect linearity, one of the categories of the variable during the encoding is dropped. This speeds up the training and improves the stability of the ML model. This is done by setting one_hot = FALSE. 
-
-# 2. Prep the recipe using the training data
-rec_prep <- prep(rec, training = train_scaled)
-
-# 3. Apply (bake) the prepped recipe on the scaled training set 
-train_processed <- bake(rec_prep, new_data = NULL)
-
-# fix names of columns which include a period:
-
-colnames(train_processed) <- make.names(colnames(train_processed))
-
-# 4. Apply (bake) the same transformations to the scaled test set
-test_processed <- bake(rec_prep, new_data = test_scaled)
-
-# fix names of columns which include a period:
-
-colnames(test_processed) <- make.names(colnames(test_processed))
 
 summary(train_processed)
 summary(test_processed)
@@ -168,7 +44,7 @@ test_h2o <- as.h2o(test_processed)
 
 ######################### Specify name of target and predictors #########################
 
-target <- "income"
+target <- "recency_interpretation"
 
 predictors <- setdiff(names(train_processed), target)
 
@@ -227,6 +103,31 @@ drf <- h2o.randomForest(
 )
 
 
+#
+
+train_h2o$recency_interpretation <- h2o.asfactor(train_h2o$recency_interpretation)
+test_h2o$recency_interpretation  <- h2o.asfactor(test_h2o$recency_interpretation)
+# Get correct levels from training data
+train_lvls <- h2o.levels(train_h2o$recency_interpretation)
+
+test_h2o$recency_interpretation <- h2o.setLevels(
+  test_h2o$recency_interpretation, 
+  train_lvls
+)
+
+train_h2o <- as.h2o(train_processed)
+test_h2o  <- as.h2o(test_processed)
+
+train_h2o$recency_interpretation <- h2o.asfactor(train_h2o$recency_interpretation)
+test_h2o$recency_interpretation  <- h2o.asfactor(test_h2o$recency_interpretation)
+
+test_h2o$recency_interpretation <- h2o.setLevels(
+  test_h2o$recency_interpretation,
+  h2o.levels(train_h2o$recency_interpretation)
+)
+
+preds_drf_test <- h2o.predict(drf, test_h2o)
+
 # Save predicted probabilities
 preds_drf_train <- h2o.predict(drf, train_h2o)
 preds_drf_test <- h2o.predict(drf, test_h2o)
@@ -235,44 +136,72 @@ preds_drf_test <- h2o.predict(drf, test_h2o)
 preds_drf_train <- as.data.frame(preds_drf_train)
 preds_drf_test <- as.data.frame(preds_drf_test)
 
-train_drf_pred <- cbind(train_processed, preds_drf_train[, "Yes", drop = FALSE]) # drop = FALSE keeps the original name of this column (yes) in the resulting data frame
-test_drf_pred <- cbind(test_processed, preds_drf_test[, "Yes", drop = FALSE])
+# Check column names - H2O DRF may return "X1" for probability of class 1, or "p1"
+# Use "X1" if available (DRF often uses this), otherwise try "p1" or column 3
+prob_col_drf <- if("X1" %in% names(preds_drf_train)) "X1" else if("p1" %in% names(preds_drf_train)) "p1" else names(preds_drf_train)[3]
+
+train_drf_pred <- cbind(train_processed, preds_drf_train[, prob_col_drf, drop = FALSE])
+test_drf_pred <- cbind(test_processed, preds_drf_test[, prob_col_drf, drop = FALSE])
 
 # Create confusion matrix using a threshold:
 
 threshold <- 0.5
 
 # training
-train_drf_pred$pred_class <- factor(ifelse(train_drf_pred$Yes > threshold,"Yes","No"))
+train_drf_pred$pred_class <- factor(ifelse(train_drf_pred[[prob_col_drf]] > threshold, "1", "0"),
+                                     levels = c("0", "1"))
 
-# predicted classes first then actual classes
-caret::confusionMatrix(
-  train_drf_pred$pred_class,
-  train_drf_pred$income,
-  positive = "Yes",
-  mode = "everything"
-)
+# Ensure recency_interpretation has correct levels using helper function
+train_drf_pred$recency_interpretation <- convert_recency_to_factor(train_drf_pred$recency_interpretation)
 
-# actual classes first then predicted probabilities
-roc_drf_train <- roc(train_drf_pred$income, train_drf_pred$Yes)
-auc(roc_drf_train)
-plot(roc_drf_train)
+# Check if both levels exist before computing ROC
+if(length(unique(na.omit(train_drf_pred$recency_interpretation))) < 2) {
+  warning("Only one class present in training data. Cannot compute ROC curve.")
+  print("Class distribution:")
+  print(table(train_drf_pred$recency_interpretation))
+} else {
+  # predicted classes first then actual classes
+  caret::confusionMatrix(
+    train_drf_pred$pred_class,
+    train_drf_pred$recency_interpretation,
+    positive = "1",
+    mode = "everything"
+  )
+  
+  # actual classes first then predicted probabilities
+  roc_drf_train <- roc(train_drf_pred$recency_interpretation, train_drf_pred[[prob_col_drf]],
+                       levels = c("0", "1"), quiet = TRUE)
+  auc(roc_drf_train)
+  plot(roc_drf_train)
+}
 
 # test
-test_drf_pred$pred_class <- factor(ifelse(test_drf_pred$Yes > threshold, "Yes", "No"))
+test_drf_pred$pred_class <- factor(ifelse(test_drf_pred[[prob_col_drf]] > threshold, "1", "0"),
+                                    levels = c("0", "1"))
 
-# predicted classes first then actual classes
-caret::confusionMatrix(
-  test_drf_pred$pred_class,
-  test_drf_pred$income,
-  positive = "Yes",
-  mode = "everything"
-)
+# Ensure recency_interpretation has correct levels using helper function
+test_drf_pred$recency_interpretation <- convert_recency_to_factor(test_drf_pred$recency_interpretation)
 
-# actual classes first then predicted probabilities
-roc_drf_test <- roc(test_drf_pred$income, test_drf_pred$Yes)
-auc(roc_drf_test)
-plot(roc_drf_test)
+# Check if both levels exist before computing ROC
+if(length(unique(na.omit(test_drf_pred$recency_interpretation))) < 2) {
+  warning("Only one class present in test data. Cannot compute ROC curve.")
+  print("Class distribution:")
+  print(table(test_drf_pred$recency_interpretation))
+} else {
+  # predicted classes first then actual classes
+  caret::confusionMatrix(
+    test_drf_pred$pred_class,
+    test_drf_pred$recency_interpretation,
+    positive = "1",
+    mode = "everything"
+  )
+  
+  # actual classes first then predicted probabilities
+  roc_drf_test <- roc(test_drf_pred$recency_interpretation, test_drf_pred[[prob_col_drf]],
+                      levels = c("0", "1"), quiet = TRUE)
+  auc(roc_drf_test)
+  plot(roc_drf_test)
+}
 
 ############################ Gradient Boosted Machines (GBM) ###################################
 
@@ -343,44 +272,72 @@ preds_gbm_test <- h2o.predict(gbm, test_h2o)
 preds_gbm_train <- as.data.frame(preds_gbm_train)
 preds_gbm_test <- as.data.frame(preds_gbm_test)
 
-train_gbm_pred <- cbind(train_processed, preds_gbm_train[, "Yes", drop = FALSE]) # drop = FALSE keeps the original name of this column (yes) in the resulting data frame
-test_gbm_pred <- cbind(test_processed, preds_gbm_test[, "Yes", drop = FALSE])
+# Check column names - H2O typically returns "p1" for probability of class 1, or column named after factor level
+# Use "p1" if available, otherwise use the probability column (usually column 3 or named after positive class)
+prob_col_gbm <- if("p1" %in% names(preds_gbm_train)) "p1" else names(preds_gbm_train)[3]
+
+train_gbm_pred <- cbind(train_processed, preds_gbm_train[, prob_col_gbm, drop = FALSE])
+test_gbm_pred <- cbind(test_processed, preds_gbm_test[, prob_col_gbm, drop = FALSE])
 
 # Create confusion matrix using a threshold:
 
 threshold <- 0.5
 
 # training
-train_gbm_pred$pred_class <- factor(ifelse(train_gbm_pred$Yes > threshold,"Yes","No"))
+train_gbm_pred$pred_class <- factor(ifelse(train_gbm_pred[[prob_col_gbm]] > threshold, "1", "0"), 
+                                     levels = c("0", "1"))
 
-# predicted classes first then actual classes
-caret::confusionMatrix(
-  train_gbm_pred$pred_class,
-  train_gbm_pred$income,
-  positive = "Yes",
-  mode = "everything"
-)
+# Ensure recency_interpretation has correct levels using helper function
+train_gbm_pred$recency_interpretation <- convert_recency_to_factor(train_gbm_pred$recency_interpretation)
 
-# actual classes first then predicted probabilities
-roc_gbm_train <- roc(train_gbm_pred$income, train_gbm_pred$Yes)
-auc(roc_gbm_train)
-plot(roc_gbm_train)
+# Check if both levels exist before computing ROC
+if(length(unique(na.omit(train_gbm_pred$recency_interpretation))) < 2) {
+  warning("Only one class present in GBM training data. Cannot compute ROC curve.")
+  print("Class distribution:")
+  print(table(train_gbm_pred$recency_interpretation))
+} else {
+  # predicted classes first then actual classes
+  caret::confusionMatrix(
+    train_gbm_pred$pred_class,
+    train_gbm_pred$recency_interpretation,
+    positive = "1",
+    mode = "everything"
+  )
+  
+  # actual classes first then predicted probabilities
+  roc_gbm_train <- roc(train_gbm_pred$recency_interpretation, train_gbm_pred[[prob_col_gbm]],
+                     levels = c("0", "1"), quiet = TRUE)
+  auc(roc_gbm_train)
+  plot(roc_gbm_train)
+}
 
 # test
-test_gbm_pred$pred_class <- factor(ifelse(test_gbm_pred$Yes > threshold, "Yes", "No"))
+test_gbm_pred$pred_class <- factor(ifelse(test_gbm_pred[[prob_col_gbm]] > threshold, "1", "0"),
+                                    levels = c("0", "1"))
 
-# predicted classes first then actual classes
-caret::confusionMatrix(
-  test_gbm_pred$pred_class,
-  test_gbm_pred$income,
-  positive = "Yes",
-  mode = "everything"
-)
+# Ensure recency_interpretation has correct levels using helper function
+test_gbm_pred$recency_interpretation <- convert_recency_to_factor(test_gbm_pred$recency_interpretation)
 
-# actual classes first then predicted probabilities
-roc_gbm_test <- roc(test_gbm_pred$income, test_gbm_pred$Yes)
-auc(roc_gbm_test)
-plot(roc_gbm_test)
+# Check if both levels exist before computing ROC
+if(length(unique(na.omit(test_gbm_pred$recency_interpretation))) < 2) {
+  warning("Only one class present in GBM test data. Cannot compute ROC curve.")
+  print("Class distribution:")
+  print(table(test_gbm_pred$recency_interpretation))
+} else {
+  # predicted classes first then actual classes
+  caret::confusionMatrix(
+    test_gbm_pred$pred_class,
+    test_gbm_pred$recency_interpretation,
+    positive = "1",
+    mode = "everything"
+  )
+  
+  # actual classes first then predicted probabilities
+  roc_gbm_test <- roc(test_gbm_pred$recency_interpretation, test_gbm_pred[[prob_col_gbm]],
+                    levels = c("0", "1"), quiet = TRUE)
+  auc(roc_gbm_test)
+  plot(roc_gbm_test)
+}
 
 ############################## Stacked ensemble #######################################
 
@@ -411,44 +368,72 @@ preds_stacked_test <- h2o.predict(stacked, test_h2o)
 preds_stacked_train <- as.data.frame(preds_stacked_train)
 preds_stacked_test <- as.data.frame(preds_stacked_test)
 
-train_stacked_pred <- cbind(train_processed, preds_stacked_train[, "Yes", drop = FALSE]) # drop = FALSE keeps the original name of this column (yes) in the resulting data frame
-test_stacked_pred <- cbind(test_processed, preds_stacked_test[, "Yes", drop = FALSE])
+# Check column names - H2O typically returns "p1" for probability of class 1, or column named after factor level
+# Use "p1" if available, otherwise use the probability column (usually column 3 or named after positive class)
+prob_col_stacked <- if("p1" %in% names(preds_stacked_train)) "p1" else names(preds_stacked_train)[3]
+
+train_stacked_pred <- cbind(train_processed, preds_stacked_train[, prob_col_stacked, drop = FALSE])
+test_stacked_pred <- cbind(test_processed, preds_stacked_test[, prob_col_stacked, drop = FALSE])
 
 # Create confusion matrix using a threshold:
 
 threshold <- 0.5
 
 # training
-train_stacked_pred$pred_class <- factor(ifelse(train_stacked_pred$Yes > threshold,"Yes","No"))
+train_stacked_pred$pred_class <- factor(ifelse(train_stacked_pred[[prob_col_stacked]] > threshold, "1", "0"),
+                                         levels = c("0", "1"))
 
-# predicted classes first then actual classes
-caret::confusionMatrix(
-  train_stacked_pred$pred_class,
-  train_stacked_pred$income,
-  positive = "Yes",
-  mode = "everything"
-)
+# Ensure recency_interpretation has correct levels using helper function
+train_stacked_pred$recency_interpretation <- convert_recency_to_factor(train_stacked_pred$recency_interpretation)
 
-# actual classes first then predicted probabilities
-roc_stacked_train <- roc(train_stacked_pred$income, train_stacked_pred$Yes)
-auc(roc_stacked_train)
-plot(roc_stacked_train)
+# Check if both levels exist before computing ROC
+if(length(unique(na.omit(train_stacked_pred$recency_interpretation))) < 2) {
+  warning("Only one class present in Stacked training data. Cannot compute ROC curve.")
+  print("Class distribution:")
+  print(table(train_stacked_pred$recency_interpretation))
+} else {
+  # predicted classes first then actual classes
+  caret::confusionMatrix(
+    train_stacked_pred$pred_class,
+    train_stacked_pred$recency_interpretation,
+    positive = "1",
+    mode = "everything"
+  )
+  
+  # actual classes first then predicted probabilities
+  roc_stacked_train <- roc(train_stacked_pred$recency_interpretation, train_stacked_pred[[prob_col_stacked]],
+                         levels = c("0", "1"), quiet = TRUE)
+  auc(roc_stacked_train)
+  plot(roc_stacked_train)
+}
 
 # test
-test_stacked_pred$pred_class <- factor(ifelse(test_stacked_pred$Yes > threshold, "Yes", "No"))
+test_stacked_pred$pred_class <- factor(ifelse(test_stacked_pred[[prob_col_stacked]] > threshold, "1", "0"),
+                                        levels = c("0", "1"))
 
-# predicted classes first then actual classes
-caret::confusionMatrix(
-  test_stacked_pred$pred_class,
-  test_stacked_pred$income,
-  positive = "Yes",
-  mode = "everything"
-)
+# Ensure recency_interpretation has correct levels using helper function
+test_stacked_pred$recency_interpretation <- convert_recency_to_factor(test_stacked_pred$recency_interpretation)
 
-# actual classes first then predicted probabilities
-roc_stacked_test <- roc(test_stacked_pred$income, test_stacked_pred$Yes)
-auc(roc_stacked_test)
-plot(roc_stacked_test)
+# Check if both levels exist before computing ROC
+if(length(unique(na.omit(test_stacked_pred$recency_interpretation))) < 2) {
+  warning("Only one class present in Stacked test data. Cannot compute ROC curve.")
+  print("Class distribution:")
+  print(table(test_stacked_pred$recency_interpretation))
+} else {
+  # predicted classes first then actual classes
+  caret::confusionMatrix(
+    test_stacked_pred$pred_class,
+    test_stacked_pred$recency_interpretation,
+    positive = "1",
+    mode = "everything"
+  )
+  
+  # actual classes first then predicted probabilities
+  roc_stacked_test <- roc(test_stacked_pred$recency_interpretation, test_stacked_pred[[prob_col_stacked]],
+                        levels = c("0", "1"), quiet = TRUE)
+  auc(roc_stacked_test)
+  plot(roc_stacked_test)
+}
 
 
 
